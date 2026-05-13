@@ -2,13 +2,15 @@ import asyncio
 import feedparser
 import json
 import os
-from datetime import datetime, time, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from threading import Thread
+from flask import Flask
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 # ===== НАСТРОЙКИ =====
-BOT_TOKEN = "8449062989:AAEkfS6kb9tQeER7yBOpa2rkJCdCAlT3xpY"
+BOT_TOKEN = "8449062989:AAFu7O6NQw7wF1O990Lf1FDoDniKFgbPG50"
 CHANNEL_ID = "@news_of_starups"
 YOUR_CHAT_ID = 1123186704
 RSS_URL = "https://techcrunch.com/feed/?size=10"
@@ -17,6 +19,20 @@ APPROVED_FILE = "/tmp/approved.json"
 MSK = timezone(timedelta(hours=3))
 # =====================
 
+# Flask-сервер для Render
+app_flask = Flask(__name__)
+
+@app_flask.route('/')
+def health_check():
+    return "✅ Бот работает!", 200
+
+def run_flask():
+    app_flask.run(host='0.0.0.0', port=10000)
+
+# Запускаем Flask в отдельном потоке
+Thread(target=run_flask, daemon=True).start()
+
+# --- ВСЁ ОСТАЛЬНОЕ (твои функции) ---
 def load_sent():
     if os.path.exists(SENT_FILE):
         with open(SENT_FILE, 'r') as f:
