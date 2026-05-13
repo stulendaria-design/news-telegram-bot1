@@ -2,6 +2,7 @@ import asyncio
 import feedparser
 import os
 import json
+import requests
 from datetime import datetime, timedelta, timezone
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
@@ -10,12 +11,16 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 BOT_TOKEN = "8832452173:AAG4lB8O5xr9YyPoXjlVgewFVmBx5ei2kU8"
 CHANNEL_ID = "@news_of_starups"
 YOUR_CHAT_ID = 1123186704
+
+# Список RSS-лент
 RSS_FEEDS = [
     {"name": "TechCrunch", "url": "https://techcrunch.com/feed/?size=10"},
     {"name": "Hacker News", "url": "https://news.ycombinator.com/rss"}
 ]
+
 SENT_FILE = "/tmp/sent.json"
 MSK = timezone(timedelta(hours=3))
+HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
 # =====================
 
 def load_sent():
@@ -30,12 +35,37 @@ def save_sent(link):
     with open(SENT_FILE, 'w') as f:
         json.dump(list(sent), f)
 
+# Функция для безопасного получения значения из словаря feedparser
+def get_feed_entry(entry, key, default='Без заголовка'):
+    try:
+        value = entry.get(key, default)
+        if not value:
+            return default
+        return value
+    except:
+        return default
+
+# Функция для загрузки и парсинга RSS с правильными заголовками
+def fetch_rss_feed(url):
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=15)
+        if response.status_code == 200:
+            # Парсим содержимое ответа
+            feed = feedparser.parse(response.content)
+            return feed, response.status_code
+        else:
+            print(f"❌ Ошибка HTTP {response.status_code} для {url}")
+            return None, response.status_code
+    except Exception as e:
+        print(f"❌ Ошибка запроса: {e}")
+        return None, None
+
 async def send_for_moderation(application, title, link, summary, source_name):
     keyboard = [[
         InlineKeyboardButton("✅ Approve", callback_data=f"approve|{link}"),
         InlineKeyboardButton("❌ Reject", callback_data=f"reject|{link}")
     ]]
-    text = f"📰 *{title}*\n📌 {source_name}\n\n{summary[:150]}...\n\n[Читать]({link})"
+    text = f"📰 *{get_feed_entry(title)}*\n📌 {source_name}\n\n{get_feed_entry(summary, 'summary')[:150]}...\n\n[Читать]({link})"
     await application.bot.send_message(
         chat_id=YOUR_CHAT_ID,
         text=text,
@@ -70,28 +100,37 @@ async def cmd_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔍 Проверяю RSS, ждите...")
     sent = load_sent()
     total = 0
-    for feed in RSS_FEEDS:
-        try:
-            print(f"📡 Проверяю {feed['name']}: {feed['url']}")
-            f = feedparser.parse(feed['url'])
-            for entry in f.entries[:5]:
-                link = entry.get('link')
-                title = entry.get('title', 'Без заголовка')
-                if link and link not in sent:
-                    print(f"🆕 Новая новость [{feed['name']}]: {title[:40]}")
-                    await send_for_moderation(
-                        context.application,
-                        title,
-                        link,
-                        entry.get('summary', ''),
-                        feed['name']
-                    )
-                    total += 1
-                    await asyncio.sleep(2)
-                else:
-                    print(f"⏭️ Пропущено (уже было): {title[:40]}")
-        except Exception as e:
-            print(f"❌ Ошибка при загрузке {feed['name']}: {e}")
+    
+    for feed_info in RSS_FEEDS:
+        print(f"📡 Проверяю {feed_info['name']}: {feed_info['url']}")
+        feed, status_code = fetch_rss_feed(feed_info['url'])
+        
+        if feed is None or status_code != 200:
+            await update.message.reply_text(f"⚠️ Не удалось загрузить {feed_info['name']}. Код ошибки: {status_code}")
+            continue
+            
+        entries = feed.entries
+        print(f"📊 Найдено записей: {len(entries)}")
+        
+        for entry in entries[:5]:
+            link = get_feed_entry(entry, 'link')
+            title = get_feed_entry(entry, 'title')
+            summary = get_feed_entry(entry, 'summary')
+            
+            if link and link not in sent:
+                print(f"🆕 Новая новость [{feed_info['name']}]: {title[:40]}")
+                await send_for_moderation(
+                    context.application,
+                    title,
+                    link,
+                    summary,
+                    feed_info['name']
+                )
+                total += 1
+                await asyncio.sleep(2)
+            else:
+                print(f"⏭️ Пропущено (уже было): {title[:40]}")
+    
     await update.message.reply_text(f"✅ Готово! Найдено {total} новых новостей.")
     print(f"🔍 Принудительная проверка завершена: {total} новых новостей")
 
