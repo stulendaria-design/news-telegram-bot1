@@ -13,7 +13,13 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 BOT_TOKEN = "8449062989:AAFu7O6NQw7wF1O990Lf1FDoDniKFgbPG50"
 CHANNEL_ID = "@news_of_starups"
 YOUR_CHAT_ID = 1123186704
-RSS_URL = "https://techcrunch.com/feed/?size=10"
+
+# Список RSS-лент (можно добавлять сколько угодно)
+RSS_FEEDS = [
+    {"name": "TechCrunch", "url": "https://techcrunch.com/feed/?size=10"},
+    {"name": "Hacker News", "url": "https://news.ycombinator.com/rss"}
+]
+
 SENT_FILE = "/tmp/sent.json"
 APPROVED_FILE = "/tmp/approved.json"
 MSK = timezone(timedelta(hours=3))
@@ -32,10 +38,9 @@ def run_flask():
     print("🌐 Flask-сервер запущен на порту 10000")
     app_flask.run(host='0.0.0.0', port=10000)
 
-# Запускаем Flask в отдельном потоке
 Thread(target=run_flask, daemon=True).start()
 
-# --- ВСЁ ОСТАЛЬНОЕ ---
+# --- РАБОТА С ФАЙЛАМИ ---
 def load_sent():
     if os.path.exists(SENT_FILE):
         with open(SENT_FILE, 'r') as f:
@@ -58,7 +63,7 @@ def save_approved(link, title):
     approved = load_approved()
     approved.append({'link': link, 'title': title, 'date': str(datetime.now(MSK))})
     with open(APPROVED_FILE, 'w') as f:
-        json.dump(approved[-100:], f)
+        json.dump(approved[-200:], f)
 
 def parse_time(time_str):
     try:
@@ -66,23 +71,25 @@ def parse_time(time_str):
     except:
         return datetime.now(MSK)
 
-async def send_for_moderation(application, title, link, summary):
-    print(f"📨 Отправляю на модерацию: {title[:40]}")
+# --- ОТПРАВКА НА МОДЕРАЦИЮ ---
+async def send_for_moderation(application, title, link, summary, source_name):
+    print(f"📨 Отправляю на модерацию [{source_name}]: {title[:40]}")
     clean_link = link.replace('&', '&amp;').replace('|', '%7C')
     keyboard = [[
         InlineKeyboardButton("✅ Approve", callback_data=f"approve|{clean_link}|{title}"),
         InlineKeyboardButton("❌ Reject", callback_data=f"reject|{clean_link}")
     ]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    text = f"📰 *{title}*\n\n{summary[:200]}...\n\n[Читать]({link})"
+    text = f"📰 *{title}*\n\n📌 Источник: {source_name}\n\n{summary[:200]}...\n\n[Читать]({link})"
     await application.bot.send_message(
         chat_id=YOUR_CHAT_ID,
         text=text,
         parse_mode="Markdown",
         reply_markup=reply_markup
     )
-    print(f"✅ Отправлено: {title[:40]}")
+    print(f"✅ Отправлено на модерацию: {title[:40]}")
 
+# --- ОБРАБОТЧИК КНОПОК ---
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -105,19 +112,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"{query.message.text}\n\n❌ Отклонено")
         print(f"❌ Отклонено: {link}")
 
+# --- КОМАНДЫ БОТА ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📰 Бот для сбора новостей работает!\n\n"
-        "Команды:\n"
-        "/last — проверить новые новости прямо сейчас\n"
-        "/digest_now — получить дайджест за неделю\n"
-        "Новости приходят на модерацию в 00 и 30 мин каждого часа с 8:00 до 23:00"
+        "📰 *Бот для сбора новостей*\n\n"
+        "✅ Работает с источниками:\n"
+        + "\n".join([f"• {feed['name']}" for feed in RSS_FEEDS]) +
+        "\n\n*Команды:*\n"
+        "/last — проверить новые новости сейчас\n"
+        "/digest_now — дайджест за неделю\n"
+        "/test — отправить тестовое сообщение в канал\n\n"
+        "Новости приходят на модерацию в 00 и 30 мин каждого часа (8:00–23:00)",
+        parse_mode="Markdown"
     )
 
 async def cmd_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔍 Проверяю RSS, ждите...")
     try:
-        await check_rss_now(context.application)
+        await check_all_rss_now(context.application)
         await update.message.reply_text("✅ Готово!")
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка: {e}")
@@ -131,37 +143,53 @@ async def cmd_digest_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 За неделю не было опубликовано ни одной новости.")
         return
     digest = "📅 *Дайджест недели*\n\n"
-    for idx, item in enumerate(weekly[-12:], 1):
+    for idx, item in enumerate(weekly[-15:], 1):
         digest += f"{idx}. [{item['title']}]({item['link']})\n"
     await update.message.reply_text(digest, parse_mode="Markdown")
 
-async def check_rss_now(application):
-    print("🔍 Принудительная проверка RSS начата")
-    sent_links = load_sent()
-    print(f"📋 Уже отправлено ссылок: {len(sent_links)}")
+async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Тестовая отправка сообщения в канал"""
     try:
-        print(f"📡 Загружаю RSS: {RSS_URL}")
-        feed = feedparser.parse(RSS_URL)
-        print(f"📊 Всего записей в ленте: {len(feed.entries)}")
-        new_count = 0
-        for entry in feed.entries[:10]:
-            link = entry.get('link', '')
-            title = entry.get('title', 'Без заголовка')
-            if link and link not in sent_links:
-                print(f"🆕 Новая новость: {title[:40]}")
-                await send_for_moderation(
-                    application,
-                    title,
-                    link,
-                    entry.get('summary', '')
-                )
-                new_count += 1
-                await asyncio.sleep(3)
-            else:
-                print(f"⏭️ Пропущено (уже было): {title[:40]}")
-        print(f"🔍 Принудительная проверка: {new_count} новых новостей")
+        message_text = " ".join(context.args)
+        if not message_text:
+            await update.message.reply_text("❌ Напиши текст после команды, например: /test Привет, канал!")
+            return
+        await context.bot.send_message(chat_id=CHANNEL_ID, text=message_text)
+        await update.message.reply_text(f"✅ Тестовое сообщение отправлено в канал: {message_text[:50]}")
     except Exception as e:
-        print(f"❌ Ошибка при загрузке RSS: {e}")
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+# --- ПРОВЕРКА ВСЕХ RSS ---
+async def check_all_rss_now(application):
+    print("🔍 Принудительная проверка всех RSS-источников")
+    sent_links = load_sent()
+    total_new = 0
+    
+    for feed_info in RSS_FEEDS:
+        print(f"📡 Проверяю {feed_info['name']}: {feed_info['url']}")
+        try:
+            feed = feedparser.parse(feed_info['url'])
+            print(f"📊 Всего записей: {len(feed.entries)}")
+            for entry in feed.entries[:5]:
+                link = entry.get('link', '')
+                title = entry.get('title', 'Без заголовка')
+                if link and link not in sent_links:
+                    print(f"🆕 Новая новость [{feed_info['name']}]: {title[:40]}")
+                    await send_for_moderation(
+                        application,
+                        title,
+                        link,
+                        entry.get('summary', ''),
+                        feed_info['name']
+                    )
+                    total_new += 1
+                    await asyncio.sleep(3)
+                else:
+                    print(f"⏭️ Пропущено (уже было): {title[:40]}")
+        except Exception as e:
+            print(f"❌ Ошибка при загрузке {feed_info['name']}: {e}")
+    
+    print(f"🔍 Принудительная проверка завершена: {total_new} новых новостей")
 
 async def scheduled_check(application):
     print(f"[{datetime.now(MSK)}] Планировщик запущен")
@@ -175,23 +203,31 @@ async def scheduled_check(application):
             if wait_seconds > 10:
                 print(f"💤 Сплю {wait_seconds} секунд до следующей проверки")
                 await asyncio.sleep(wait_seconds - 5)
+            
             print(f"🔍 Плановая проверка RSS в {datetime.now(MSK)}")
             sent_links = load_sent()
-            feed = feedparser.parse(RSS_URL)
-            new_count = 0
-            for entry in feed.entries[:5]:
-                link = entry.get('link', '')
-                if link and link not in sent_links:
-                    await send_for_moderation(
-                        application,
-                        entry.get('title', 'Без заголовка'),
-                        link,
-                        entry.get('summary', '')
-                    )
-                    new_count += 1
-                    await asyncio.sleep(3)
-            if new_count:
-                print(f"[{datetime.now(MSK)}] Найдено {new_count} новых новостей")
+            total_new = 0
+            
+            for feed_info in RSS_FEEDS:
+                try:
+                    feed = feedparser.parse(feed_info['url'])
+                    for entry in feed.entries[:5]:
+                        link = entry.get('link', '')
+                        if link and link not in sent_links:
+                            await send_for_moderation(
+                                application,
+                                entry.get('title', 'Без заголовка'),
+                                link,
+                                entry.get('summary', ''),
+                                feed_info['name']
+                            )
+                            total_new += 1
+                            await asyncio.sleep(3)
+                except Exception as e:
+                    print(f"❌ Ошибка при загрузке {feed_info['name']}: {e}")
+            
+            if total_new:
+                print(f"[{datetime.now(MSK)}] Найдено {total_new} новых новостей")
             else:
                 print(f"[{datetime.now(MSK)}] Новых новостей нет")
         else:
@@ -208,16 +244,18 @@ async def weekly_digest_job(application):
         if wait_seconds > 0:
             print(f"💤 До воскресного дайджеста спать {wait_seconds // 3600} часов")
             await asyncio.sleep(wait_seconds)
+        
         approved = load_approved()
         week_ago = datetime.now(MSK) - timedelta(days=7)
         weekly = [item for item in approved if parse_time(item['date']) >= week_ago]
         if weekly:
             digest = "📅 *Еженедельный дайджест новостей*\n\n"
-            for idx, item in enumerate(weekly[-15:], 1):
+            for idx, item in enumerate(weekly[-20:], 1):
                 digest += f"{idx}. [{item['title']}]({item['link']})\n"
             await application.bot.send_message(chat_id=CHANNEL_ID, text=digest, parse_mode="Markdown")
             print(f"📅 Отправлен еженедельный дайджест: {len(weekly)} новостей")
 
+# --- ЗАПУСК ---
 def main():
     print("🚀 Запускаю основную функцию main()")
     application = Application.builder().token(BOT_TOKEN).build()
@@ -225,6 +263,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("last", cmd_last))
     application.add_handler(CommandHandler("digest_now", cmd_digest_now))
+    application.add_handler(CommandHandler("test", cmd_test))
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
