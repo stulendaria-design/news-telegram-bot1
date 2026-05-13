@@ -2,6 +2,7 @@ import asyncio
 import feedparser
 import json
 import os
+import html
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from threading import Thread
@@ -14,7 +15,7 @@ BOT_TOKEN = "8449062989:AAFu7O6NQw7wF1O990Lf1FDoDniKFgbPG50"
 CHANNEL_ID = "@news_of_starups"
 YOUR_CHAT_ID = 1123186704
 
-# Список RSS-лент (можно добавлять сколько угодно)
+# Список RSS-лент
 RSS_FEEDS = [
     {"name": "TechCrunch", "url": "https://techcrunch.com/feed/?size=10"},
     {"name": "Hacker News", "url": "https://news.ycombinator.com/rss"}
@@ -27,7 +28,7 @@ MSK = timezone(timedelta(hours=3))
 
 print("🚀 Бот запускается...")
 
-# Flask-сервер для Render
+# Flask-сервер
 app_flask = Flask(__name__)
 
 @app_flask.route('/')
@@ -71,6 +72,12 @@ def parse_time(time_str):
     except:
         return datetime.now(MSK)
 
+def escape_html(text):
+    """Безопасное экранирование текста для HTML"""
+    if not text:
+        return ""
+    return html.escape(text[:300])
+
 # --- ОТПРАВКА НА МОДЕРАЦИЮ ---
 async def send_for_moderation(application, title, link, summary, source_name):
     print(f"📨 Отправляю на модерацию [{source_name}]: {title[:40]}")
@@ -80,12 +87,20 @@ async def send_for_moderation(application, title, link, summary, source_name):
         InlineKeyboardButton("❌ Reject", callback_data=f"reject|{clean_link}")
     ]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    text = f"📰 *{title}*\n\n📌 Источник: {source_name}\n\n{summary[:200]}...\n\n[Читать]({link})"
+    
+    # Экранируем текст для HTML
+    safe_title = escape_html(title)
+    safe_summary = escape_html(summary)
+    safe_source = escape_html(source_name)
+    
+    text = f"📰 <b>{safe_title}</b>\n\n📌 Источник: {safe_source}\n\n{safe_summary}...\n\n<a href='{link}'>Читать полностью</a>"
+    
     await application.bot.send_message(
         chat_id=YOUR_CHAT_ID,
         text=text,
-        parse_mode="Markdown",
-        reply_markup=reply_markup
+        parse_mode="HTML",
+        reply_markup=reply_markup,
+        disable_web_page_preview=True
     )
     print(f"✅ Отправлено на модерацию: {title[:40]}")
 
@@ -101,29 +116,29 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "approve":
         title = data[2] if len(data) > 2 else ""
         original_text = query.message.text
-        await context.bot.send_message(chat_id=CHANNEL_ID, text=original_text, parse_mode="Markdown")
+        await context.bot.send_message(chat_id=CHANNEL_ID, text=original_text, parse_mode="HTML", disable_web_page_preview=True)
         save_sent(link)
         if title:
             save_approved(link, title)
-        await query.edit_message_text(f"{original_text}\n\n✅ Одобрено и опубликовано")
+        await query.edit_message_text(f"{original_text}\n\n✅ Одобрено и опубликовано", parse_mode="HTML")
         print(f"✅ Одобрено: {title[:40]}")
     elif action == "reject":
         save_sent(link)
-        await query.edit_message_text(f"{query.message.text}\n\n❌ Отклонено")
+        await query.edit_message_text(f"{query.message.text}\n\n❌ Отклонено", parse_mode="HTML")
         print(f"❌ Отклонено: {link}")
 
 # --- КОМАНДЫ БОТА ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sources = "\n".join([f"• {feed['name']}" for feed in RSS_FEEDS])
     await update.message.reply_text(
-        "📰 *Бот для сбора новостей*\n\n"
-        "✅ Работает с источниками:\n"
-        + "\n".join([f"• {feed['name']}" for feed in RSS_FEEDS]) +
-        "\n\n*Команды:*\n"
-        "/last — проверить новые новости сейчас\n"
-        "/digest_now — дайджест за неделю\n"
-        "/test — отправить тестовое сообщение в канал\n\n"
-        "Новости приходят на модерацию в 00 и 30 мин каждого часа (8:00–23:00)",
-        parse_mode="Markdown"
+        f"📰 <b>Бот для сбора новостей</b>\n\n"
+        f"✅ Работает с источниками:\n{sources}\n\n"
+        f"<b>Команды:</b>\n"
+        f"/last — проверить новые новости сейчас\n"
+        f"/digest_now — дайджест за неделю\n"
+        f"/test — отправить тестовое сообщение в канал\n\n"
+        f"Новости приходят на модерацию в 00 и 30 мин каждого часа (8:00–23:00)",
+        parse_mode="HTML"
     )
 
 async def cmd_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -142,10 +157,10 @@ async def cmd_digest_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not weekly:
         await update.message.reply_text("📭 За неделю не было опубликовано ни одной новости.")
         return
-    digest = "📅 *Дайджест недели*\n\n"
+    digest = "<b>📅 Дайджест недели</b>\n\n"
     for idx, item in enumerate(weekly[-15:], 1):
-        digest += f"{idx}. [{item['title']}]({item['link']})\n"
-    await update.message.reply_text(digest, parse_mode="Markdown")
+        digest += f"{idx}. <a href='{item['link']}'>{item['title']}</a>\n"
+    await update.message.reply_text(digest, parse_mode="HTML", disable_web_page_preview=True)
 
 async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Тестовая отправка сообщения в канал"""
@@ -249,10 +264,10 @@ async def weekly_digest_job(application):
         week_ago = datetime.now(MSK) - timedelta(days=7)
         weekly = [item for item in approved if parse_time(item['date']) >= week_ago]
         if weekly:
-            digest = "📅 *Еженедельный дайджест новостей*\n\n"
+            digest = "<b>📅 Еженедельный дайджест новостей</b>\n\n"
             for idx, item in enumerate(weekly[-20:], 1):
-                digest += f"{idx}. [{item['title']}]({item['link']})\n"
-            await application.bot.send_message(chat_id=CHANNEL_ID, text=digest, parse_mode="Markdown")
+                digest += f"{idx}. <a href='{item['link']}'>{item['title']}</a>\n"
+            await application.bot.send_message(chat_id=CHANNEL_ID, text=digest, parse_mode="HTML", disable_web_page_preview=True)
             print(f"📅 Отправлен еженедельный дайджест: {len(weekly)} новостей")
 
 # --- ЗАПУСК ---
