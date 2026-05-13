@@ -19,6 +19,8 @@ APPROVED_FILE = "/tmp/approved.json"
 MSK = timezone(timedelta(hours=3))
 # =====================
 
+print("🚀 Бот запускается...")
+
 # Flask-сервер для Render
 app_flask = Flask(__name__)
 
@@ -27,12 +29,13 @@ def health_check():
     return "✅ Бот работает!", 200
 
 def run_flask():
+    print("🌐 Flask-сервер запущен на порту 10000")
     app_flask.run(host='0.0.0.0', port=10000)
 
 # Запускаем Flask в отдельном потоке
 Thread(target=run_flask, daemon=True).start()
 
-# --- ВСЁ ОСТАЛЬНОЕ (твои функции) ---
+# --- ВСЁ ОСТАЛЬНОЕ ---
 def load_sent():
     if os.path.exists(SENT_FILE):
         with open(SENT_FILE, 'r') as f:
@@ -64,6 +67,7 @@ def parse_time(time_str):
         return datetime.now(MSK)
 
 async def send_for_moderation(application, title, link, summary):
+    print(f"📨 Отправляю на модерацию: {title[:40]}")
     clean_link = link.replace('&', '&amp;').replace('|', '%7C')
     keyboard = [[
         InlineKeyboardButton("✅ Approve", callback_data=f"approve|{clean_link}|{title}"),
@@ -77,7 +81,7 @@ async def send_for_moderation(application, title, link, summary):
         parse_mode="Markdown",
         reply_markup=reply_markup
     )
-    print(f"📨 Отправлено на модерацию: {title[:40]}")
+    print(f"✅ Отправлено: {title[:40]}")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -112,8 +116,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔍 Проверяю RSS, ждите...")
-    await check_rss_now(context.application)
-    await update.message.reply_text("✅ Готово!")
+    try:
+        await check_rss_now(context.application)
+        await update.message.reply_text("✅ Готово!")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+        print(f"❌ Ошибка в cmd_last: {e}")
 
 async def cmd_digest_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     approved = load_approved()
@@ -128,21 +136,32 @@ async def cmd_digest_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(digest, parse_mode="Markdown")
 
 async def check_rss_now(application):
+    print("🔍 Принудительная проверка RSS начата")
     sent_links = load_sent()
-    feed = feedparser.parse(RSS_URL)
-    new_count = 0
-    for entry in feed.entries[:10]:
-        link = entry.get('link', '')
-        if link and link not in sent_links:
-            await send_for_moderation(
-                application,
-                entry.get('title', 'Без заголовка'),
-                link,
-                entry.get('summary', '')
-            )
-            new_count += 1
-            await asyncio.sleep(3)
-    print(f"🔍 Принудительная проверка: {new_count} новых новостей")
+    print(f"📋 Уже отправлено ссылок: {len(sent_links)}")
+    try:
+        print(f"📡 Загружаю RSS: {RSS_URL}")
+        feed = feedparser.parse(RSS_URL)
+        print(f"📊 Всего записей в ленте: {len(feed.entries)}")
+        new_count = 0
+        for entry in feed.entries[:10]:
+            link = entry.get('link', '')
+            title = entry.get('title', 'Без заголовка')
+            if link and link not in sent_links:
+                print(f"🆕 Новая новость: {title[:40]}")
+                await send_for_moderation(
+                    application,
+                    title,
+                    link,
+                    entry.get('summary', '')
+                )
+                new_count += 1
+                await asyncio.sleep(3)
+            else:
+                print(f"⏭️ Пропущено (уже было): {title[:40]}")
+        print(f"🔍 Принудительная проверка: {new_count} новых новостей")
+    except Exception as e:
+        print(f"❌ Ошибка при загрузке RSS: {e}")
 
 async def scheduled_check(application):
     print(f"[{datetime.now(MSK)}] Планировщик запущен")
@@ -154,7 +173,9 @@ async def scheduled_check(application):
             else:
                 wait_seconds = (60 - now.minute) * 60 - now.second
             if wait_seconds > 10:
+                print(f"💤 Сплю {wait_seconds} секунд до следующей проверки")
                 await asyncio.sleep(wait_seconds - 5)
+            print(f"🔍 Плановая проверка RSS в {datetime.now(MSK)}")
             sent_links = load_sent()
             feed = feedparser.parse(RSS_URL)
             new_count = 0
@@ -174,6 +195,7 @@ async def scheduled_check(application):
             else:
                 print(f"[{datetime.now(MSK)}] Новых новостей нет")
         else:
+            print(f"💤 Ночной режим: сейчас {now.hour}:{now.minute}, сплю час")
             await asyncio.sleep(3600)
 
 async def weekly_digest_job(application):
@@ -184,6 +206,7 @@ async def weekly_digest_job(application):
         next_run = next_sunday.replace(hour=10, minute=0, second=0, microsecond=0)
         wait_seconds = (next_run - now).total_seconds()
         if wait_seconds > 0:
+            print(f"💤 До воскресного дайджеста спать {wait_seconds // 3600} часов")
             await asyncio.sleep(wait_seconds)
         approved = load_approved()
         week_ago = datetime.now(MSK) - timedelta(days=7)
@@ -193,8 +216,10 @@ async def weekly_digest_job(application):
             for idx, item in enumerate(weekly[-15:], 1):
                 digest += f"{idx}. [{item['title']}]({item['link']})\n"
             await application.bot.send_message(chat_id=CHANNEL_ID, text=digest, parse_mode="Markdown")
+            print(f"📅 Отправлен еженедельный дайджест: {len(weekly)} новостей")
 
 def main():
+    print("🚀 Запускаю основную функцию main()")
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(CommandHandler("start", start))
@@ -205,6 +230,7 @@ def main():
     asyncio.set_event_loop(loop)
     loop.create_task(scheduled_check(application))
     loop.create_task(weekly_digest_job(application))
+    print("✅ Задачи запланированы, запускаю polling...")
     application.run_polling()
 
 if __name__ == "__main__":
